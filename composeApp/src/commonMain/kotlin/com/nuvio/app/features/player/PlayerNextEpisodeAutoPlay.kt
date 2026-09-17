@@ -1,5 +1,6 @@
 package com.nuvio.app.features.player
 
+import co.touchlab.kermit.Logger
 import com.nuvio.app.features.addons.AddonRepository
 import com.nuvio.app.features.addons.enabledAddons
 import com.nuvio.app.features.debrid.DebridSettingsRepository
@@ -18,6 +19,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+
+private val solYanNextEpisodeDebugLog = Logger.withTag("SolYanNextEpisodeDebug")
 
 internal fun CoroutineScope.launchPlayerNextEpisodeAutoPlay(
     previousJob: Job?,
@@ -39,6 +42,12 @@ internal fun CoroutineScope.launchPlayerNextEpisodeAutoPlay(
     val nextVideoId = nextEpisodeInfo?.videoId ?: return null
     val nextVideo = allEpisodes.firstOrNull { video -> video.id == nextVideoId } ?: return null
     if (nextEpisodeInfo.hasAired != true) return null
+
+    solYanNextEpisodeDebugLog.i {
+        "AUTONEXT_LAUNCH parentMetaId=$parentMetaId nextVideoId=$nextVideoId " +
+            "season=${nextVideo.season} episode=${nextVideo.episode} " +
+            "mode=${settings.streamAutoPlayMode} enabled=${settings.streamAutoPlayNextEpisodeEnabled}"
+    }
 
     val downloadedNextEpisode = DownloadsRepository.findPlayableDownload(
         parentMetaId = parentMetaId,
