@@ -28,6 +28,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
+import co.touchlab.kermit.Logger
 import com.nuvio.app.core.ui.LocalNuvioPlatformDensity
 import com.nuvio.app.features.player.desktop.DesktopHostOs
 import com.nuvio.app.features.player.desktop.DesktopPlayerPictureInPicture
@@ -36,6 +37,8 @@ import com.nuvio.app.features.player.desktop.NativePlayerHost
 import com.nuvio.app.features.player.desktop.desktopFullscreenChanges
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.drop
+
+private val solYanPlaybackDebugLog = Logger.withTag("SolYanPlaybackDebug")
 
 @Composable
 actual fun PlatformPlayerSurface(
@@ -134,6 +137,7 @@ private fun NativePlayerSurface(
     val playerSettings by PlayerSettingsRepository.uiState.collectAsState()
     val decoderPriority = playerSettings.decoderPriority
     val nvidiaRtxSuperResolutionEnabled = playerSettings.nvidiaRtxSuperResolutionEnabled
+    val previousDebugSnapshot = remember(sourceUrl) { mutableStateOf<PlayerPlaybackSnapshot?>(null) }
 
     SideEffect {
         onControllerReady(controller)
@@ -175,10 +179,6 @@ private fun NativePlayerSurface(
         onDispose { controller.dispose() }
     }
 
-    // The controls overlay owns the player shortcuts. After alt-tab, desktop
-    // window focus can return to the AWT/Compose host instead of the embedded
-    // WebView, so explicitly hand keyboard focus back to the native controls
-    // whenever the player window becomes active again.
     DisposableEffect(controller, hostFirstFullSizePaintComplete.value) {
         val uninstall = if (hostFirstFullSizePaintComplete.value) {
             controller.installWindowFocusForwarding()
@@ -203,6 +203,11 @@ private fun NativePlayerSurface(
             return@LaunchedEffect
         }
         delay(16L)
+        if (DesktopHostOs.current == DesktopHostOs.WINDOWS) {
+            solYanPlaybackDebugLog.i {
+                "ATTACH source=${sourceUrl.toSolYanDebugSourceKey()} initialPositionMs=$initialPositionMs playWhenReady=$playWhenReady"
+            }
+        }
         controller.attach(
             sourceUrl = sourceUrl,
             sourceHeaders = playbackHeaders,
@@ -248,9 +253,20 @@ private fun NativePlayerSurface(
         }
     }
 
-    LaunchedEffect(controller) {
+    LaunchedEffect(controller, sourceUrl) {
         while (true) {
-            onSnapshot(controller.snapshot())
+            val snapshot = controller.snapshot()
+            onSnapshot(snapshot)
+            if (DesktopHostOs.current == DesktopHostOs.WINDOWS &&
+                (snapshot != previousDebugSnapshot.value || snapshot.isEnded)
+            ) {
+                solYanPlaybackDebugLog.i {
+                    "SNAPSHOT source=${sourceUrl.toSolYanDebugSourceKey()} " +
+                        "positionMs=${snapshot.positionMs} durationMs=${snapshot.durationMs} " +
+                        "loading=${snapshot.isLoading} playing=${snapshot.isPlaying} ended=${snapshot.isEnded}"
+                }
+                previousDebugSnapshot.value = snapshot
+            }
             delay(500L)
         }
     }
@@ -264,8 +280,6 @@ private fun NativePlayerSurface(
             .background(Color.Black),
         contentAlignment = Alignment.Center,
     ) {
-        // SwingPanel keeps the stable AWT host. PiP moves only the native player
-        // surface to the independent window, so Compose never loses its host peer.
         CompositionLocalProvider(LocalDensity provides platformDensity) {
             SwingPanel(
                 factory = { host },
@@ -284,7 +298,6 @@ private fun NativePlayerSurface(
             )
         }
 
-        // Placeholder overlay shown when video has moved to PiP window
         if (isInPip) {
             Box(
                 modifier = Modifier
@@ -313,6 +326,14 @@ private fun NativePlayerSurface(
         }
     }
 }
+
+private fun String.toSolYanDebugSourceKey(): String = runCatching {
+    val uri = java.net.URI(this)
+    val scheme = uri.scheme.orEmpty()
+    val host = uri.host.orEmpty()
+    val path = uri.path.orEmpty()
+    if (scheme.isNotBlank() && host.isNotBlank()) "$scheme://$host$path" else take(180)
+}.getOrElse { take(180) }
 
 @Composable
 private fun DesktopStubPlayerSurface(
