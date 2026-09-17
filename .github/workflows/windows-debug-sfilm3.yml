@@ -1,0 +1,102 @@
+name: Windows SFilm3 Playback Debug
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/windows-debug-sfilm3.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows-debug:
+    name: Build Windows debug MSI
+    runs-on: windows-2022
+    env:
+      WEBVIEW2_VERSION: 1.0.4078.44
+
+    steps:
+      - name: Check out diagnostic branch
+        uses: actions/checkout@v6
+        with:
+          ref: solyan-debug-sfilm3-pc
+          fetch-depth: 1
+          lfs: false
+
+      - name: Fetch Windows runtime
+        shell: bash
+        run: |
+          git lfs pull --include="composeApp/src/desktopMain/native/windows/runtime/**,composeApp/src/desktopMain/resources/torrserver/windows-amd64/TorrServer.exe" --exclude=""
+          test -f composeApp/src/desktopMain/native/windows/runtime/libmpv-2.dll
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Write build-safe local properties
+        shell: pwsh
+        run: |
+          @"
+          NUVIO_SUPABASE_URL=https://example.invalid
+          NUVIO_SUPABASE_ANON_KEY=debug-build-only
+          NUVIO_SUPABASE_FALLBACK_URL=https://example.invalid
+          TRAKT_CLIENT_ID=debug-build-only
+          TRAKT_CLIENT_SECRET=debug-build-only
+          TMDB_API_KEY=debug-build-only
+          "@ | Set-Content -Path local.properties -Encoding ascii
+
+      - name: Install WebView2 SDK
+        shell: pwsh
+        run: |
+          nuget install Microsoft.Web.WebView2 `
+            -Version $env:WEBVIEW2_VERSION `
+            -OutputDirectory "$env:RUNNER_TEMP\nuget" `
+            -DirectDownload `
+            -NonInteractive `
+            -NoCache
+
+          $webView2Root = Join-Path $env:RUNNER_TEMP "nuget\Microsoft.Web.WebView2.$env:WEBVIEW2_VERSION"
+          $loaderLibrary = Join-Path $webView2Root "build\native\x64\WebView2Loader.dll.lib"
+          if (-not (Test-Path $loaderLibrary)) {
+            throw "WebView2Loader.dll.lib was not found at $loaderLibrary"
+          }
+          "WEBVIEW2_ROOT=$webView2Root" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build MSI
+        shell: pwsh
+        run: |
+          & .\gradlew.bat `
+            :composeApp:packageReleaseMsi `
+            "-Pnuvio.webview2.dir=$env:WEBVIEW2_ROOT" `
+            "-Pcompose.desktop.packaging.checkJdkVendor=false" `
+            --no-configuration-cache `
+            --no-daemon `
+            --stacktrace
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Collect MSI
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem -Path composeApp\build\compose -Recurse -Filter *.msi
+          if (-not $files) { throw "No MSI produced" }
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          foreach ($file in $files) {
+            Copy-Item $file.FullName -Destination (Join-Path out $file.Name)
+          }
+          Get-ChildItem out | Format-Table Name, Length, LastWriteTime
+
+      - name: Upload diagnostic MSI
+        uses: actions/upload-artifact@v7
+        with:
+          name: Nuvio-Solyan-PC-SFilm3-Debug-Windows-x64
+          path: out/*.msi
+          if-no-files-found: error
+          retention-days: 14
