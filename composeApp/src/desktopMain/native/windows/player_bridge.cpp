@@ -1620,7 +1620,12 @@ private:
             if (!mpv) {
                 throw std::runtime_error("mpv_create failed.");
             }
-            initialStartSeconds = initialPositionMs > 0 ? (double)initialPositionMs / 1000.0 : 0.0;
+            // SolYan A/B: disable native initial resume on Windows only.
+            // The common Desktop layer already avoids a second initialPositionMs seek,
+            // so this isolates whether mpv's loadfile start= option is causing SFilm3
+            // series playback to open at EOF.
+            const long long effectiveInitialPositionMs = 0;
+            initialStartSeconds = 0.0;
 
             setMpvOptionStringLocked("config", "no");
             setMpvOptionStringLocked("osc", "no");
@@ -1689,9 +1694,9 @@ private:
 
             std::vector<const char *> loadCommand = {"loadfile", sourceUrl.c_str()};
             std::string loadOptions;
-            if (initialPositionMs > 0) {
+            if (effectiveInitialPositionMs > 0) {
                 char startBuffer[64];
-                std::snprintf(startBuffer, sizeof(startBuffer), "start=%.3f", (double)initialPositionMs / 1000.0);
+                std::snprintf(startBuffer, sizeof(startBuffer), "start=%.3f", (double)effectiveInitialPositionMs / 1000.0);
                 loadOptions = startBuffer;
                 loadCommand.push_back("replace");
                 loadCommand.push_back("-1");
