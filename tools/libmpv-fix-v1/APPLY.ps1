@@ -1,5 +1,5 @@
-. "$PSScriptRoot\COMMON.ps1"
 param([string]$JarPath)
+. "$PSScriptRoot\COMMON.ps1"
 
 $PatchDll = Join-Path $PSScriptRoot "libmpv-2.dll"
 $LocalStateFile = Join-Path $PSScriptRoot "PATCH-STATE.txt"
@@ -38,7 +38,7 @@ try {
             Write-Host "ALREADY PATCHED" -ForegroundColor Green
             Write-Host "Stable fix is already present and rollback data is available."
             Write-Host "JAR: $jar"
-            exit 0
+            return
         }
 
         # Seamlessly adopt the successful legacy runtime A/B currently installed.
@@ -64,7 +64,7 @@ try {
                 Write-Host "The working runtime A/B has been adopted as Nuvio-SolYan-PC libmpv Fix v$script:FixVersion."
                 Write-Host "No binary was changed during this adoption."
                 Write-Host "Rollback backup: $stableBackup"
-                exit 0
+                return
             }
         }
 
@@ -72,7 +72,7 @@ try {
         Write-Host "ALREADY PATCHED" -ForegroundColor Green
         Write-Host "The fixed libmpv is present, but this package cannot prove where its rollback backup is."
         Write-Host "No changes were made."
-        exit 0
+        return
     }
 
     if ($currentLibmpvHash -ne $script:KnownBadLibmpvSha256) {
@@ -81,7 +81,7 @@ try {
         Write-Host "Installed libmpv SHA256: $currentLibmpvHash"
         Write-Host "This is not the known bad Nuvio runtime, so the stable patch will NOT overwrite it."
         Write-Host "Verify the new Nuvio runtime before deciding whether any patch is still needed."
-        exit 0
+        return
     }
 
     $originalJarHash = $currentJarHash
