@@ -1,0 +1,317 @@
+name: Build Nuvio libmpv Fix v1.0.0
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/windows-libmpv-fix-v1.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Verify and package stable libmpv fix
+    runs-on: windows-2022
+
+    steps:
+      - name: Check out stable fix branch
+        uses: actions/checkout@v6
+        with:
+          ref: solyan-libmpv-fix-v1
+          fetch-depth: 1
+          lfs: false
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Fetch original Nuvio libmpv LFS object
+        shell: bash
+        run: |
+          git lfs pull --include="composeApp/src/desktopMain/native/windows/runtime/libmpv-2.dll" --exclude=""
+          test -f composeApp/src/desktopMain/native/windows/runtime/libmpv-2.dll
+
+      - name: Verify original Nuvio runtime
+        shell: pwsh
+        run: |
+          $old = "composeApp\src\desktopMain\native\windows\runtime\libmpv-2.dll"
+          $hash = (Get-FileHash $old -Algorithm SHA256).Hash.ToLowerInvariant()
+          $expected = "07c68bb211f23a218ded0a36eb12207dc3aeb44e5318ffca6ce9dcc7c3173906"
+          if ($hash -ne $expected) {
+            throw "Unexpected Nuvio libmpv hash. Expected $expected, got $hash"
+          }
+          Write-Host "Known-bad Nuvio libmpv SHA256: $hash"
+
+      - name: Download verified fixed libmpv runtime
+        shell: pwsh
+        run: |
+          $url = "https://github.com/Predidit/libmpv-win32-video-cmake/releases/download/202609151348/mpv-dev-x86_64-20260915-git-0b7ed67.7z"
+          $archive = Join-Path $env:RUNNER_TEMP "mpv-dev-x86_64-20260915-git-0b7ed67.7z"
+
+          Invoke-WebRequest -Uri $url -OutFile $archive -UseBasicParsing
+
+          $archiveHash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          $expectedArchive = "8adceab30b6bcc5503fa9d3823b68f4acd15ee1c41d6dc2492826f373531c10a"
+          if ($archiveHash -ne $expectedArchive) {
+            throw "Runtime archive SHA256 mismatch. Expected $expectedArchive, got $archiveHash"
+          }
+
+          $sevenZip = (Get-Command 7z.exe -ErrorAction Stop).Source
+          $extractDir = Join-Path $env:RUNNER_TEMP "fixed-libmpv"
+          New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
+          & $sevenZip x $archive "-o$extractDir" -y | Out-Host
+          if ($LASTEXITCODE -ne 0) { throw "7z extraction failed" }
+
+          $dll = Get-ChildItem -Path $extractDir -Recurse -File -Filter "libmpv-2.dll" | Select-Object -First 1
+          if (-not $dll) { throw "libmpv-2.dll not found in runtime archive" }
+
+          $fixedHash = (Get-FileHash $dll.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          $expectedFixed = "361e3a306707454a24e7d3558b2eb7a9ccc23a4f5ed396fe7e77f0a44908eda5"
+          if ($fixedHash -ne $expectedFixed) {
+            throw "Fixed libmpv SHA256 mismatch. Expected $expectedFixed, got $fixedHash"
+          }
+
+          Copy-Item $dll.FullName tools\libmpv-fix-v1\libmpv-2.dll -Force
+          Write-Host "Fixed libmpv SHA256: $fixedHash"
+
+      - name: Verify Nuvio-required ABI exports
+        shell: pwsh
+        run: |
+          $source = @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class NativeDllProbe {
+              [DllImport("kernel32", SetLastError=true, CharSet=CharSet.Unicode)]
+              public static extern IntPtr LoadLibraryEx(string lpFileName, IntPtr hFile, uint dwFlags);
+              [DllImport("kernel32", SetLastError=true, CharSet=CharSet.Ansi)]
+              public static extern IntPtr GetProcAddress(IntPtr hModule, string lpProcName);
+              [DllImport("kernel32", SetLastError=true)]
+              public static extern bool FreeLibrary(IntPtr hModule);
+          }
+          '@
+          Add-Type -TypeDefinition $source
+
+          $dll = (Resolve-Path "tools\libmpv-fix-v1\libmpv-2.dll").Path
+          $handle = [NativeDllProbe]::LoadLibraryEx($dll, [IntPtr]::Zero, 0x00000008)
+          if ($handle -eq [IntPtr]::Zero) {
+            throw "LoadLibraryEx failed. Win32=$([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+          }
+
+          try {
+            $required = @(
+              "mpv_create",
+              "mpv_initialize",
+              "mpv_terminate_destroy",
+              "mpv_set_option",
+              "mpv_set_option_string",
+              "mpv_set_property",
+              "mpv_set_property_string",
+              "mpv_get_property",
+              "mpv_command",
+              "mpv_error_string",
+              "mpv_free",
+              "mpv_wait_event",
+              "mpv_wakeup"
+            )
+            foreach ($name in $required) {
+              if ([NativeDllProbe]::GetProcAddress($handle, $name) -eq [IntPtr]::Zero) {
+                throw "Required Nuvio libmpv export missing: $name"
+              }
+              Write-Host "ABI export OK: $name"
+            }
+          } finally {
+            [void][NativeDllProbe]::FreeLibrary($handle)
+          }
+
+      - name: Validate PowerShell 5.1 syntax
+        shell: powershell
+        run: |
+          $scripts = @(
+            "tools\libmpv-fix-v1\COMMON.ps1",
+            "tools\libmpv-fix-v1\STATUS.ps1",
+            "tools\libmpv-fix-v1\APPLY.ps1",
+            "tools\libmpv-fix-v1\ROLLBACK.ps1"
+          )
+
+          foreach ($script in $scripts) {
+            $tokens = $null
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $script),
+              [ref]$tokens,
+              [ref]$errors
+            )
+            if ($errors.Count -gt 0) {
+              $errors | Format-List
+              throw "PowerShell syntax validation failed: $script"
+            }
+            Write-Host "PowerShell 5.1 syntax OK: $script"
+          }
+
+      - name: Self-test stable Apply Status Rollback
+        shell: powershell
+        run: |
+          $toolDir = (Resolve-Path "tools\libmpv-fix-v1").Path
+          $originalDll = (Resolve-Path "composeApp\src\desktopMain\native\windows\runtime\libmpv-2.dll").Path
+
+          $sandbox = Join-Path $env:RUNNER_TEMP "nuvio-libmpv-fix-v1-selftest"
+          Remove-Item $sandbox -Recurse -Force -ErrorAction SilentlyContinue
+          $nativeDir = Join-Path $sandbox "jarroot\native\windows"
+          New-Item -ItemType Directory -Force -Path $nativeDir | Out-Null
+
+          Copy-Item $originalDll (Join-Path $nativeDir "libmpv-2.dll") -Force
+          [IO.File]::WriteAllBytes(
+            (Join-Path $nativeDir "player_bridge.dll"),
+            [Text.Encoding]::ASCII.GetBytes("UNPATCHED-PLAYER-BRIDGE")
+          )
+          [IO.File]::WriteAllText((Join-Path $sandbox "jarroot\marker.txt"), "original")
+
+          $jarRoot = Join-Path $sandbox "jarroot"
+          $jar = Join-Path $sandbox "composeApp-desktop-selftest.jar"
+          & jar --create --file $jar -C $jarRoot .
+          if ($LASTEXITCODE -ne 0) { throw "jar.exe failed to create synthetic JAR" }
+
+          $originalJarHash = (Get-FileHash $jar -Algorithm SHA256).Hash.ToLowerInvariant()
+
+          $statusBefore = (& "tools\libmpv-fix-v1\STATUS.ps1" -JarPath $jar 2>&1 | Out-String)
+          Write-Host $statusBefore
+          if ($statusBefore -notmatch "STATUS: NEEDS_PATCH") {
+            throw "STATUS did not report NEEDS_PATCH before Apply"
+          }
+
+          & "tools\libmpv-fix-v1\APPLY.ps1" -JarPath $jar
+          if (-not $?) { throw "APPLY.ps1 failed" }
+
+          $statusAfter = (& "tools\libmpv-fix-v1\STATUS.ps1" -JarPath $jar 2>&1 | Out-String)
+          Write-Host $statusAfter
+          if ($statusAfter -notmatch "STATUS: PATCHED") {
+            throw "STATUS did not report PATCHED after Apply"
+          }
+
+          $patchedDllHash = & {
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            $zip = [System.IO.Compression.ZipFile]::OpenRead($jar)
+            try {
+              $entry = $zip.GetEntry("native/windows/libmpv-2.dll")
+              $stream = $entry.Open()
+              try {
+                $sha = [Security.Cryptography.SHA256]::Create()
+                try {
+                  ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace("-", "").ToLowerInvariant()
+                } finally { $sha.Dispose() }
+              } finally { $stream.Dispose() }
+            } finally { $zip.Dispose() }
+          }
+
+          if ($patchedDllHash -ne "361e3a306707454a24e7d3558b2eb7a9ccc23a4f5ed396fe7e77f0a44908eda5") {
+            throw "Patched JAR has wrong libmpv hash"
+          }
+
+          & "tools\libmpv-fix-v1\ROLLBACK.ps1" -JarPath $jar
+          if (-not $?) { throw "ROLLBACK.ps1 failed" }
+
+          $restoredJarHash = (Get-FileHash $jar -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($restoredJarHash -ne $originalJarHash) {
+            throw "Rollback did not restore the exact original JAR"
+          }
+
+          $statusRestored = (& "tools\libmpv-fix-v1\STATUS.ps1" -JarPath $jar 2>&1 | Out-String)
+          Write-Host $statusRestored
+          if ($statusRestored -notmatch "STATUS: NEEDS_PATCH") {
+            throw "STATUS did not return to NEEDS_PATCH after rollback"
+          }
+
+          Write-Host "STABLE APPLY / STATUS / EXACT ROLLBACK SELF-TEST PASS"
+
+      - name: Self-test upstream-changed protection
+        shell: powershell
+        run: |
+          $sandbox = Join-Path $env:RUNNER_TEMP "nuvio-upstream-changed-selftest"
+          Remove-Item $sandbox -Recurse -Force -ErrorAction SilentlyContinue
+          $nativeDir = Join-Path $sandbox "jarroot\native\windows"
+          New-Item -ItemType Directory -Force -Path $nativeDir | Out-Null
+
+          [IO.File]::WriteAllBytes(
+            (Join-Path $nativeDir "libmpv-2.dll"),
+            [Text.Encoding]::ASCII.GetBytes("FUTURE-UPSTREAM-LIBMPV")
+          )
+          [IO.File]::WriteAllBytes(
+            (Join-Path $nativeDir "player_bridge.dll"),
+            [Text.Encoding]::ASCII.GetBytes("FUTURE-UPSTREAM-BRIDGE")
+          )
+
+          $jar = Join-Path $sandbox "composeApp-desktop-future.jar"
+          & jar --create --file $jar -C (Join-Path $sandbox "jarroot") .
+          if ($LASTEXITCODE -ne 0) { throw "jar.exe failed" }
+
+          $before = (Get-FileHash $jar -Algorithm SHA256).Hash.ToLowerInvariant()
+          $output = (& "tools\libmpv-fix-v1\APPLY.ps1" -JarPath $jar 2>&1 | Out-String)
+          Write-Host $output
+          $after = (Get-FileHash $jar -Algorithm SHA256).Hash.ToLowerInvariant()
+
+          if ($before -ne $after) {
+            throw "Stable Apply modified an unknown future upstream runtime"
+          }
+          if ($output -notmatch "UPSTREAM RUNTIME CHANGED") {
+            throw "Stable Apply did not clearly report UPSTREAM RUNTIME CHANGED"
+          }
+
+          Write-Host "UPSTREAM-CHANGED PROTECTION SELF-TEST PASS"
+
+      - name: Package stable fix
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+
+          Copy-Item tools\libmpv-fix-v1\libmpv-2.dll out\libmpv-2.dll
+          Copy-Item tools\libmpv-fix-v1\COMMON.ps1 out\COMMON.ps1
+          Copy-Item tools\libmpv-fix-v1\STATUS.ps1 out\STATUS.ps1
+          Copy-Item tools\libmpv-fix-v1\STATUS.cmd out\STATUS.cmd
+          Copy-Item tools\libmpv-fix-v1\APPLY.ps1 out\APPLY.ps1
+          Copy-Item tools\libmpv-fix-v1\APPLY.cmd out\APPLY.cmd
+          Copy-Item tools\libmpv-fix-v1\ROLLBACK.ps1 out\ROLLBACK.ps1
+          Copy-Item tools\libmpv-fix-v1\ROLLBACK.cmd out\ROLLBACK.cmd
+          Copy-Item tools\libmpv-fix-v1\README.md out\README.md
+          Copy-Item tools\libmpv-fix-v1\VERSION.txt out\VERSION.txt
+
+          $dllHash = (Get-FileHash out\libmpv-2.dll -Algorithm SHA256).Hash.ToLowerInvariant()
+          @(
+            "PRODUCT=Nuvio-SolYan-PC-libmpv-Fix-v1.0.0"
+            "SOURCE_BRANCH=solyan-libmpv-fix-v1"
+            "BASE_NUVIO_UPSTREAM=796f10dddfceabdd6ab7e06a7e43b283f28fd2aa"
+            "KNOWN_BAD_LIBMPV_SHA256=07c68bb211f23a218ded0a36eb12207dc3aeb44e5318ffca6ce9dcc7c3173906"
+            "FIXED_LIBMPV_SHA256=$dllHash"
+            "FIXED_RUNTIME_RELEASE=202609151348"
+            "FIXED_RUNTIME_ARCHIVE=mpv-dev-x86_64-20260915-git-0b7ed67.7z"
+            "FIXED_RUNTIME_ARCHIVE_SHA256=8adceab30b6bcc5503fa9d3823b68f4acd15ee1c41d6dc2492826f373531c10a"
+            "STATUS_STATES=PATCHED|NEEDS_PATCH|UPSTREAM_CHANGED|OLD_AB_BRIDGE_ACTIVE"
+            "SELF_TEST=ABI + PowerShell5.1 + Apply + Status + exact rollback + future-upstream protection PASS"
+          ) | Set-Content out\PATCH-MANIFEST.txt -Encoding ascii
+
+          Get-ChildItem out | Sort-Object Name | Format-Table Name,Length
+          Get-Content out\PATCH-MANIFEST.txt
+
+      - name: Create ZIP and checksum
+        shell: pwsh
+        run: |
+          $zip = "Nuvio-SolYan-PC-libmpv-Fix-v1.0.0.zip"
+          Compress-Archive -Path out\* -DestinationPath $zip -CompressionLevel Optimal
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "ZIP_SHA256=$hash" | Set-Content ZIP-SHA256.txt -Encoding ascii
+          Get-Item $zip | Format-List Name,Length,LastWriteTime
+          Get-Content ZIP-SHA256.txt
+
+      - name: Upload stable fix
+        uses: actions/upload-artifact@v7
+        with:
+          name: Nuvio-SolYan-PC-libmpv-Fix-v1.0.0
+          path: |
+            Nuvio-SolYan-PC-libmpv-Fix-v1.0.0.zip
+            ZIP-SHA256.txt
+          if-no-files-found: error
+          retention-days: 90
