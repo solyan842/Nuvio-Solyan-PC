@@ -1,4 +1,5 @@
 name: Windows SFilm3 Playback Debug
+# Diagnostic source commit: 1ae6d3ce4102c3532d8fa67c052adeac60f634db
 
 on:
   workflow_dispatch:
