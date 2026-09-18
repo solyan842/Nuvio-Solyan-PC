@@ -1,5 +1,5 @@
-name: Build Native PlayTorrio Header A-B DLL
-# Source: solyan-ab-playtorrio-native-headers @ 96b5b0a2d29a94471ed8c4c379cd2f6581437c4b
+name: Build Native PlayTorrio Header A-B Package
+# DLL source change: solyan-ab-playtorrio-native-headers @ 96b5b0a2d29a94471ed8c4c379cd2f6581437c4b
 
 on:
   workflow_dispatch:
@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   build:
-    name: Build player_bridge.dll only
+    name: Build and verify native A-B patch package
     runs-on: windows-2022
     env:
       WEBVIEW2_VERSION: 1.0.4078.44
@@ -61,30 +61,89 @@ jobs:
             --stacktrace
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Verify and collect DLL
+      - name: Validate PowerShell patch helpers
+        shell: pwsh
+        run: |
+          $scripts = @(
+            "tools\native-header-ab\APPLY.ps1",
+            "tools\native-header-ab\ROLLBACK.ps1"
+          )
+          foreach ($script in $scripts) {
+            $tokens = $null
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $script),
+              [ref]$tokens,
+              [ref]$errors
+            )
+            if ($errors.Count -gt 0) {
+              $errors | Format-List
+              throw "PowerShell syntax validation failed: $script"
+            }
+            Write-Host "PowerShell syntax OK: $script"
+          }
+
+      - name: Verify and collect package
         shell: pwsh
         run: |
           $dll = "composeApp\build\native\windows\player_bridge.dll"
           $pdb = "composeApp\build\native\windows\player_bridge.pdb"
           if (-not (Test-Path $dll)) { throw "player_bridge.dll not produced" }
+
           New-Item -ItemType Directory -Force -Path out | Out-Null
           Copy-Item $dll out\player_bridge.dll
           if (Test-Path $pdb) { Copy-Item $pdb out\player_bridge.pdb }
-          $hash = (Get-FileHash out\player_bridge.dll -Algorithm SHA256).Hash.ToLowerInvariant()
+          Copy-Item tools\native-header-ab\APPLY.ps1 out\APPLY.ps1
+          Copy-Item tools\native-header-ab\ROLLBACK.ps1 out\ROLLBACK.ps1
+          Copy-Item tools\native-header-ab\APPLY.cmd out\APPLY.cmd
+          Copy-Item tools\native-header-ab\ROLLBACK.cmd out\ROLLBACK.cmd
+          Copy-Item tools\native-header-ab\README.md out\README.md
+
+          $dllHash = (Get-FileHash out\player_bridge.dll -Algorithm SHA256).Hash.ToLowerInvariant()
           @(
             "SOURCE_BRANCH=solyan-ab-playtorrio-native-headers"
-            "SOURCE_COMMIT=96b5b0a2d29a94471ed8c4c379cd2f6581437c4b"
+            "DLL_SOURCE_COMMIT=96b5b0a2d29a94471ed8c4c379cd2f6581437c4b"
             "BASE_UPSTREAM=796f10dddfceabdd6ab7e06a7e43b283f28fd2aa"
-            "DLL_SHA256=$hash"
+            "DLL_SHA256=$dllHash"
             "CHANGE=PlayTorrio-compatible default HTTP identity only"
+            "SCOPE=Windows native player bridge only"
+            "ROLLBACK=Untouched application JAR backup created before patch"
           ) | Set-Content out\PATCH-MANIFEST.txt -Encoding ascii
-          Get-Item out\player_bridge.dll | Format-List Name,Length,LastWriteTime
+
+          $expected = @(
+            "player_bridge.dll",
+            "APPLY.ps1",
+            "ROLLBACK.ps1",
+            "APPLY.cmd",
+            "ROLLBACK.cmd",
+            "README.md",
+            "PATCH-MANIFEST.txt"
+          )
+          foreach ($name in $expected) {
+            if (-not (Test-Path (Join-Path out $name))) {
+              throw "Missing package file: $name"
+            }
+          }
+
+          Get-ChildItem out | Sort-Object Name | Format-Table Name,Length
           Get-Content out\PATCH-MANIFEST.txt
 
-      - name: Upload native A-B DLL
+      - name: Create ZIP
+        shell: pwsh
+        run: |
+          $zip = "Nuvio-PC-SFilm3-PlayTorrio-Headers-Native-AB.zip"
+          Compress-Archive -Path out\* -DestinationPath $zip -CompressionLevel Optimal
+          $zipHash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "ZIP_SHA256=$zipHash" | Set-Content ZIP-SHA256.txt -Encoding ascii
+          Get-Item $zip | Format-List Name,Length,LastWriteTime
+          Get-Content ZIP-SHA256.txt
+
+      - name: Upload native A-B package
         uses: actions/upload-artifact@v7
         with:
           name: Nuvio-PC-SFilm3-PlayTorrio-Headers-Native-AB
-          path: out/*
+          path: |
+            Nuvio-PC-SFilm3-PlayTorrio-Headers-Native-AB.zip
+            ZIP-SHA256.txt
           if-no-files-found: error
           retention-days: 14
