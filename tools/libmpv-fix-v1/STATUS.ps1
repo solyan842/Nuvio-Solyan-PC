@@ -49,6 +49,7 @@ try {
     Write-Host "libmpv SHA256: $libmpvHash"
     Write-Host "Rollback ready: $rollbackReady"
     Write-Host ""
+    Write-Output "STATUS_CODE=$state"
 } catch {
     Write-Host ""
     Write-Host "STATUS ERROR" -ForegroundColor Red
