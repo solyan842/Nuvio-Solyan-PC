@@ -1,0 +1,259 @@
+name: Build PlayTorrio libmpv Runtime A-B Package
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/windows-libmpv-runtime-ab.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and verify libmpv runtime A-B
+    runs-on: windows-2022
+
+    steps:
+      - name: Check out runtime A-B branch
+        uses: actions/checkout@v6
+        with:
+          ref: solyan-ab-playtorrio-libmpv-runtime
+          fetch-depth: 1
+          lfs: false
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Fetch original Nuvio libmpv LFS object only
+        shell: bash
+        run: |
+          git lfs pull --include="composeApp/src/desktopMain/native/windows/runtime/libmpv-2.dll" --exclude=""
+          test -f composeApp/src/desktopMain/native/windows/runtime/libmpv-2.dll
+
+      - name: Verify original Nuvio libmpv hash
+        shell: pwsh
+        run: |
+          $old = "composeApp\src\desktopMain\native\windows\runtime\libmpv-2.dll"
+          $hash = (Get-FileHash $old -Algorithm SHA256).Hash.ToLowerInvariant()
+          $expected = "07c68bb211f23a218ded0a36eb12207dc3aeb44e5318ffca6ce9dcc7c3173906"
+          if ($hash -ne $expected) {
+            throw "Unexpected Nuvio libmpv hash. Expected $expected, got $hash"
+          }
+          Write-Host "Original Nuvio libmpv SHA256: $hash"
+
+      - name: Download PlayTorrio media_kit libmpv runtime
+        shell: pwsh
+        run: |
+          $url = "https://github.com/Predidit/libmpv-win32-video-cmake/releases/download/202609151348/mpv-dev-x86_64-20260915-git-0b7ed67.7z"
+          $archive = Join-Path $env:RUNNER_TEMP "mpv-dev-x86_64-20260915-git-0b7ed67.7z"
+          Invoke-WebRequest -Uri $url -OutFile $archive -UseBasicParsing
+          $hash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          $expected = "8adceab30b6bcc5503fa9d3823b68f4acd15ee1c41d6dc2492826f373531c10a"
+          if ($hash -ne $expected) {
+            throw "Downloaded archive hash mismatch. Expected $expected, got $hash"
+          }
+
+          $sevenZip = (Get-Command 7z.exe -ErrorAction Stop).Source
+          $extractDir = Join-Path $env:RUNNER_TEMP "playtorrio-libmpv"
+          New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
+          & $sevenZip x $archive "-o$extractDir" -y | Out-Host
+          if ($LASTEXITCODE -ne 0) { throw "7z extraction failed" }
+
+          $dll = Get-ChildItem -Path $extractDir -Recurse -File -Filter "libmpv-2.dll" | Select-Object -First 1
+          if (-not $dll) { throw "libmpv-2.dll not found in PlayTorrio runtime archive" }
+
+          New-Item -ItemType Directory -Force -Path runtime | Out-Null
+          Copy-Item $dll.FullName runtime\libmpv-2.dll -Force
+          $dllHash = (Get-FileHash runtime\libmpv-2.dll -Algorithm SHA256).Hash.ToLowerInvariant()
+          "PLAYTORRIO_LIBMPV_SHA256=$dllHash" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "PlayTorrio libmpv SHA256: $dllHash"
+          Get-Item runtime\libmpv-2.dll | Format-List Name,Length,LastWriteTime
+
+      - name: Verify Nuvio-required libmpv ABI exports
+        shell: pwsh
+        run: |
+          $source = @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class NativeDllProbe {
+              [DllImport("kernel32", SetLastError=true, CharSet=CharSet.Unicode)]
+              public static extern IntPtr LoadLibraryEx(string lpFileName, IntPtr hFile, uint dwFlags);
+              [DllImport("kernel32", SetLastError=true, CharSet=CharSet.Ansi)]
+              public static extern IntPtr GetProcAddress(IntPtr hModule, string lpProcName);
+              [DllImport("kernel32", SetLastError=true)]
+              public static extern bool FreeLibrary(IntPtr hModule);
+          }
+          '@
+          Add-Type -TypeDefinition $source
+          $dll = (Resolve-Path "runtime\libmpv-2.dll").Path
+          $handle = [NativeDllProbe]::LoadLibraryEx($dll, [IntPtr]::Zero, 0x00000008)
+          if ($handle -eq [IntPtr]::Zero) {
+            throw "LoadLibraryEx failed for PlayTorrio libmpv. Win32=$([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+          }
+          try {
+            $required = @(
+              "mpv_create",
+              "mpv_initialize",
+              "mpv_terminate_destroy",
+              "mpv_set_option",
+              "mpv_set_option_string",
+              "mpv_set_property",
+              "mpv_set_property_string",
+              "mpv_get_property",
+              "mpv_command",
+              "mpv_error_string",
+              "mpv_free",
+              "mpv_wait_event",
+              "mpv_wakeup"
+            )
+            foreach ($name in $required) {
+              $ptr = [NativeDllProbe]::GetProcAddress($handle, $name)
+              if ($ptr -eq [IntPtr]::Zero) {
+                throw "Required Nuvio libmpv export missing: $name"
+              }
+              Write-Host "ABI export OK: $name"
+            }
+          } finally {
+            [void][NativeDllProbe]::FreeLibrary($handle)
+          }
+
+      - name: Validate patch helpers with Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $scripts = @(
+            "tools\libmpv-runtime-ab\APPLY.ps1",
+            "tools\libmpv-runtime-ab\ROLLBACK.ps1"
+          )
+          foreach ($script in $scripts) {
+            $tokens = $null
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $script),
+              [ref]$tokens,
+              [ref]$errors
+            )
+            if ($errors.Count -gt 0) {
+              $errors | Format-List
+              throw "PowerShell syntax validation failed: $script"
+            }
+            Write-Host "PowerShell syntax OK: $script"
+          }
+
+      - name: Self-test Apply and exact rollback
+        shell: powershell
+        run: |
+          $toolDir = (Resolve-Path "tools\libmpv-runtime-ab").Path
+          Copy-Item runtime\libmpv-2.dll (Join-Path $toolDir "libmpv-2.dll") -Force
+
+          $sandbox = Join-Path $env:RUNNER_TEMP "nuvio-libmpv-ab-selftest"
+          Remove-Item $sandbox -Recurse -Force -ErrorAction SilentlyContinue
+          $nativeDir = Join-Path $sandbox "jarroot\native\windows"
+          New-Item -ItemType Directory -Force -Path $nativeDir | Out-Null
+
+          Copy-Item "composeApp\src\desktopMain\native\windows\runtime\libmpv-2.dll" (Join-Path $nativeDir "libmpv-2.dll") -Force
+          [IO.File]::WriteAllBytes(
+            (Join-Path $nativeDir "player_bridge.dll"),
+            [Text.Encoding]::ASCII.GetBytes("UNPATCHED-PLAYER-BRIDGE")
+          )
+          [IO.File]::WriteAllText((Join-Path $sandbox "jarroot\marker.txt"), "original")
+
+          $jarRoot = Join-Path $sandbox "jarroot"
+          $jar = Join-Path $sandbox "composeApp-desktop-selftest.jar"
+          & jar --create --file $jar -C $jarRoot .
+          if ($LASTEXITCODE -ne 0) { throw "jar.exe failed to create synthetic JAR" }
+
+          $entries = & jar --list --file $jar
+          if ($entries -notcontains "native/windows/libmpv-2.dll") { throw "Synthetic JAR missing libmpv" }
+          if ($entries -notcontains "native/windows/player_bridge.dll") { throw "Synthetic JAR missing player bridge" }
+
+          $originalJarHash = (Get-FileHash $jar -Algorithm SHA256).Hash.ToLowerInvariant()
+          $patchDllHash = (Get-FileHash runtime\libmpv-2.dll -Algorithm SHA256).Hash.ToLowerInvariant()
+
+          & "tools\libmpv-runtime-ab\APPLY.ps1" -JarPath $jar
+          if (-not $?) { throw "APPLY.ps1 failed" }
+
+          $backup = "$jar.solyan-sfilm3-libmpv-ab-original.bak"
+          if (-not (Test-Path $backup)) { throw "Runtime A/B backup missing" }
+
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [System.IO.Compression.ZipFile]::OpenRead($jar)
+          try {
+            $entry = $zip.GetEntry("native/windows/libmpv-2.dll")
+            if ($null -eq $entry) { throw "Patched JAR lost libmpv-2.dll" }
+            $stream = $entry.Open()
+            try {
+              $sha = [Security.Cryptography.SHA256]::Create()
+              try {
+                $entryHash = ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace("-", "").ToLowerInvariant()
+              } finally { $sha.Dispose() }
+            } finally { $stream.Dispose() }
+          } finally { $zip.Dispose() }
+
+          if ($entryHash -ne $patchDllHash) {
+            throw "Patched libmpv hash mismatch. Expected $patchDllHash, got $entryHash"
+          }
+
+          & "tools\libmpv-runtime-ab\ROLLBACK.ps1" -JarPath $jar
+          if (-not $?) { throw "ROLLBACK.ps1 failed" }
+
+          $restoredJarHash = (Get-FileHash $jar -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($restoredJarHash -ne $originalJarHash) {
+            throw "Rollback did not restore exact original JAR"
+          }
+
+          Write-Host "LIBMPV A/B APPLY/ROLLBACK SELF-TEST PASS"
+          Remove-Item (Join-Path $toolDir "libmpv-2.dll") -Force
+          Remove-Item (Join-Path $toolDir "PATCH-STATE.txt") -Force -ErrorAction SilentlyContinue
+
+      - name: Collect package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          Copy-Item runtime\libmpv-2.dll out\libmpv-2.dll
+          Copy-Item tools\libmpv-runtime-ab\APPLY.ps1 out\APPLY.ps1
+          Copy-Item tools\libmpv-runtime-ab\ROLLBACK.ps1 out\ROLLBACK.ps1
+          Copy-Item tools\libmpv-runtime-ab\APPLY.cmd out\APPLY.cmd
+          Copy-Item tools\libmpv-runtime-ab\ROLLBACK.cmd out\ROLLBACK.cmd
+          Copy-Item tools\libmpv-runtime-ab\README.md out\README.md
+
+          @(
+            "SOURCE_BRANCH=solyan-ab-playtorrio-libmpv-runtime"
+            "BASE_UPSTREAM=796f10dddfceabdd6ab7e06a7e43b283f28fd2aa"
+            "NUVIO_ORIGINAL_LIBMPV_SHA256=07c68bb211f23a218ded0a36eb12207dc3aeb44e5318ffca6ce9dcc7c3173906"
+            "PLAYTORRIO_RUNTIME_RELEASE=202609151348"
+            "PLAYTORRIO_RUNTIME_ARCHIVE=mpv-dev-x86_64-20260915-git-0b7ed67.7z"
+            "PLAYTORRIO_RUNTIME_ARCHIVE_SHA256=8adceab30b6bcc5503fa9d3823b68f4acd15ee1c41d6dc2492826f373531c10a"
+            "PATCH_LIBMPV_SHA256=$env:PLAYTORRIO_LIBMPV_SHA256"
+            "CHANGE=Replace Nuvio bundled libmpv only"
+            "PLAYER_BRIDGE=UNCHANGED"
+            "SELF_TEST=ABI exports + PowerShell 5.1 + Apply + exact rollback PASS"
+          ) | Set-Content out\PATCH-MANIFEST.txt -Encoding ascii
+
+          Get-ChildItem out | Sort-Object Name | Format-Table Name,Length
+          Get-Content out\PATCH-MANIFEST.txt
+
+      - name: Create ZIP
+        shell: pwsh
+        run: |
+          $zip = "Nuvio-PC-SFilm3-PlayTorrio-libmpv-Runtime-AB.zip"
+          Compress-Archive -Path out\* -DestinationPath $zip -CompressionLevel Optimal
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "ZIP_SHA256=$hash" | Set-Content ZIP-SHA256.txt -Encoding ascii
+          Get-Item $zip | Format-List Name,Length,LastWriteTime
+          Get-Content ZIP-SHA256.txt
+
+      - name: Upload package
+        uses: actions/upload-artifact@v7
+        with:
+          name: Nuvio-PC-SFilm3-PlayTorrio-libmpv-Runtime-AB
+          path: |
+            Nuvio-PC-SFilm3-PlayTorrio-libmpv-Runtime-AB.zip
+            ZIP-SHA256.txt
+          if-no-files-found: error
+          retention-days: 14
