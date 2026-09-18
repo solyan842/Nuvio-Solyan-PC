@@ -118,7 +118,7 @@ try {
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $stream = [System.IO.File]::Open($tempJar, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
     try {
-        $zip = New-Object System.IO.Compression.ZipArchive($stream, [System.IO.Compression.ZipArchiveMode]::Update, $false)
+        $zip = [System.IO.Compression.ZipArchive]::new($stream, [System.IO.Compression.ZipArchiveMode]::Update, $false)
         try {
             $oldEntry = $zip.GetEntry($EntryName)
             if ($null -eq $oldEntry) { throw "Expected JAR entry disappeared: $EntryName" }
