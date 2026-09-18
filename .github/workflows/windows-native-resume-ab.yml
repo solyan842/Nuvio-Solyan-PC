@@ -1,0 +1,189 @@
+name: Build Windows Initial Resume A-B Package
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/windows-native-resume-ab.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and verify Windows initial-resume A-B
+    runs-on: windows-2022
+    env:
+      WEBVIEW2_VERSION: 1.0.4078.44
+
+    steps:
+      - name: Check out resume A-B branch
+        uses: actions/checkout@v6
+        with:
+          ref: solyan-ab-disable-windows-initial-resume
+          fetch-depth: 1
+          lfs: false
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Install WebView2 SDK
+        shell: pwsh
+        run: |
+          nuget install Microsoft.Web.WebView2 `
+            -Version $env:WEBVIEW2_VERSION `
+            -OutputDirectory "$env:RUNNER_TEMP\nuget" `
+            -DirectDownload `
+            -NonInteractive `
+            -NoCache
+          $root = Join-Path $env:RUNNER_TEMP "nuget\Microsoft.Web.WebView2.$env:WEBVIEW2_VERSION"
+          $lib = Join-Path $root "build\native\x64\WebView2Loader.dll.lib"
+          if (-not (Test-Path $lib)) { throw "WebView2Loader.dll.lib missing" }
+          "WEBVIEW2_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build native Windows bridge
+        shell: pwsh
+        run: |
+          & .\gradlew.bat `
+            :composeApp:buildWindowsPlayerBridge `
+            "-Pnuvio.webview2.dir=$env:WEBVIEW2_ROOT" `
+            --no-configuration-cache `
+            --no-daemon `
+            --stacktrace
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Validate patch helpers with Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $scripts = @(
+            "tools\native-resume-ab\APPLY.ps1",
+            "tools\native-resume-ab\ROLLBACK.ps1"
+          )
+          foreach ($script in $scripts) {
+            $tokens = $null
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $script),
+              [ref]$tokens,
+              [ref]$errors
+            )
+            if ($errors.Count -gt 0) {
+              $errors | Format-List
+              throw "PowerShell syntax validation failed: $script"
+            }
+            Write-Host "PowerShell syntax OK: $script"
+          }
+
+      - name: Self-test Apply and exact rollback
+        shell: powershell
+        run: |
+          $builtDll = (Resolve-Path "composeApp\build\native\windows\player_bridge.dll").Path
+          $toolDir = (Resolve-Path "tools\native-resume-ab").Path
+          Copy-Item $builtDll (Join-Path $toolDir "player_bridge.dll") -Force
+
+          $sandbox = Join-Path $env:RUNNER_TEMP "nuvio-resume-ab-selftest"
+          Remove-Item $sandbox -Recurse -Force -ErrorAction SilentlyContinue
+          $entryDir = Join-Path $sandbox "jarroot\native\windows"
+          New-Item -ItemType Directory -Force -Path $entryDir | Out-Null
+          [IO.File]::WriteAllBytes((Join-Path $entryDir "player_bridge.dll"), [Text.Encoding]::ASCII.GetBytes("ORIGINAL-BRIDGE"))
+          [IO.File]::WriteAllText((Join-Path $sandbox "jarroot\marker.txt"), "original")
+
+          $jarRoot = Join-Path $sandbox "jarroot"
+          $jar = Join-Path $sandbox "composeApp-desktop-selftest.jar"
+          & jar --create --file $jar -C $jarRoot .
+          if ($LASTEXITCODE -ne 0) { throw "jar.exe failed" }
+
+          $entries = & jar --list --file $jar
+          if ($entries -notcontains "native/windows/player_bridge.dll") {
+            throw "Synthetic JAR missing native/windows/player_bridge.dll"
+          }
+
+          $originalJarHash = (Get-FileHash $jar -Algorithm SHA256).Hash.ToLowerInvariant()
+          $patchDllHash = (Get-FileHash $builtDll -Algorithm SHA256).Hash.ToLowerInvariant()
+
+          & "tools\native-resume-ab\APPLY.ps1" -JarPath $jar
+          if (-not $?) { throw "APPLY.ps1 failed" }
+
+          $backup = "$jar.solyan-sfilm3-resume-ab-original.bak"
+          if (-not (Test-Path $backup)) { throw "Resume A/B backup missing" }
+
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [System.IO.Compression.ZipFile]::OpenRead($jar)
+          try {
+            $entry = $zip.GetEntry("native/windows/player_bridge.dll")
+            if ($null -eq $entry) { throw "Patched JAR lost player_bridge.dll" }
+            $stream = $entry.Open()
+            try {
+              $sha = [Security.Cryptography.SHA256]::Create()
+              try {
+                $entryHash = ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace("-", "").ToLowerInvariant()
+              } finally { $sha.Dispose() }
+            } finally { $stream.Dispose() }
+          } finally { $zip.Dispose() }
+
+          if ($entryHash -ne $patchDllHash) { throw "Patched DLL hash mismatch" }
+
+          & "tools\native-resume-ab\ROLLBACK.ps1" -JarPath $jar
+          if (-not $?) { throw "ROLLBACK.ps1 failed" }
+
+          $restoredJarHash = (Get-FileHash $jar -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($restoredJarHash -ne $originalJarHash) { throw "Rollback did not restore exact original JAR" }
+
+          Write-Host "RESUME A/B APPLY/ROLLBACK SELF-TEST PASS"
+          Remove-Item (Join-Path $toolDir "player_bridge.dll") -Force
+          Remove-Item (Join-Path $toolDir "PATCH-STATE.txt") -Force -ErrorAction SilentlyContinue
+
+      - name: Collect package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          Copy-Item composeApp\build\native\windows\player_bridge.dll out\player_bridge.dll
+          if (Test-Path composeApp\build\native\windows\player_bridge.pdb) {
+            Copy-Item composeApp\build\native\windows\player_bridge.pdb out\player_bridge.pdb
+          }
+          Copy-Item tools\native-resume-ab\APPLY.ps1 out\APPLY.ps1
+          Copy-Item tools\native-resume-ab\ROLLBACK.ps1 out\ROLLBACK.ps1
+          Copy-Item tools\native-resume-ab\APPLY.cmd out\APPLY.cmd
+          Copy-Item tools\native-resume-ab\ROLLBACK.cmd out\ROLLBACK.cmd
+          Copy-Item tools\native-resume-ab\README.md out\README.md
+
+          $dllHash = (Get-FileHash out\player_bridge.dll -Algorithm SHA256).Hash.ToLowerInvariant()
+          @(
+            "SOURCE_BRANCH=solyan-ab-disable-windows-initial-resume"
+            "NATIVE_SOURCE_COMMIT=85e6719853fa4a75a4ef3d45a05b44997206144f"
+            "BASE_UPSTREAM=796f10dddfceabdd6ab7e06a7e43b283f28fd2aa"
+            "DLL_SHA256=$dllHash"
+            "CHANGE=Disable mpv loadfile start= initial resume on Windows only"
+            "SCOPE=Windows native player bridge only"
+            "SELF_TEST=PowerShell 5.1 syntax + Apply + exact rollback PASS"
+          ) | Set-Content out\PATCH-MANIFEST.txt -Encoding ascii
+
+          Get-ChildItem out | Sort-Object Name | Format-Table Name,Length
+          Get-Content out\PATCH-MANIFEST.txt
+
+      - name: Create ZIP
+        shell: pwsh
+        run: |
+          $zip = "Nuvio-PC-SFilm3-Windows-Initial-Resume-AB.zip"
+          Compress-Archive -Path out\* -DestinationPath $zip -CompressionLevel Optimal
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "ZIP_SHA256=$hash" | Set-Content ZIP-SHA256.txt -Encoding ascii
+          Get-Content ZIP-SHA256.txt
+
+      - name: Upload package
+        uses: actions/upload-artifact@v7
+        with:
+          name: Nuvio-PC-SFilm3-Windows-Initial-Resume-AB
+          path: |
+            Nuvio-PC-SFilm3-Windows-Initial-Resume-AB.zip
+            ZIP-SHA256.txt
+          if-no-files-found: error
+          retention-days: 14
