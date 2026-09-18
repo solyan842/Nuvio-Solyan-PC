@@ -232,6 +232,49 @@ std::string lowerCopy(std::string value) {
     return value;
 }
 
+constexpr const char *kDefaultPlaybackUserAgent =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+
+std::string playbackHeaderName(const std::string &line) {
+    const size_t separator = line.find(':');
+    if (separator == std::string::npos) return std::string();
+    return lowerCopy(trim(line.substr(0, separator)));
+}
+
+bool hasPlaybackHeader(const std::vector<std::string> &headers, const std::string &name) {
+    const std::string normalizedName = lowerCopy(name);
+    return std::any_of(headers.begin(), headers.end(), [&](const std::string &line) {
+        return playbackHeaderName(line) == normalizedName;
+    });
+}
+
+std::string playbackHeaderValue(const std::vector<std::string> &headers, const std::string &name) {
+    const std::string normalizedName = lowerCopy(name);
+    for (const std::string &line : headers) {
+        const size_t separator = line.find(':');
+        if (separator == std::string::npos) continue;
+        if (playbackHeaderName(line) == normalizedName) {
+            return trim(line.substr(separator + 1));
+        }
+    }
+    return std::string();
+}
+
+std::vector<std::string> withDefaultPlaybackHeaders(const std::vector<std::string> &headerLines) {
+    std::vector<std::string> effective = headerLines;
+    if (!hasPlaybackHeader(effective, "Connection")) {
+        effective.emplace_back("Connection: keep-alive");
+    }
+    if (!hasPlaybackHeader(effective, "Accept")) {
+        effective.emplace_back("Accept: */*");
+    }
+    if (!hasPlaybackHeader(effective, "User-Agent")) {
+        effective.emplace_back(std::string("User-Agent: ") + kDefaultPlaybackUserAgent);
+    }
+    return effective;
+}
+
 COLORREF rgbIntToColorRef(jint rgb) {
     BYTE red = (BYTE)((rgb >> 16) & 0xFF);
     BYTE green = (BYTE)((rgb >> 8) & 0xFF);
@@ -1669,18 +1712,22 @@ private:
                 throw std::runtime_error(std::string("mpv wid option failed: ") + api.errorText(widResult));
             }
 
-            if (!headerLines.empty()) {
-                std::string headers;
-                for (size_t index = 0; index < headerLines.size(); index++) {
-                    if (index > 0) headers.push_back(',');
-                    // Escape backslashes and commas in header values
-                    for (char c : headerLines[index]) {
-                        if (c == '\\' || c == ',') headers.push_back('\\');
-                        headers.push_back(c);
-                    }
-                }
-                setMpvOptionStringLocked("http-header-fields", headers.c_str());
+            const std::vector<std::string> effectiveHeaderLines = withDefaultPlaybackHeaders(headerLines);
+            const std::string effectiveUserAgent = playbackHeaderValue(effectiveHeaderLines, "User-Agent");
+            if (!effectiveUserAgent.empty()) {
+                setMpvOptionStringLocked("user-agent", effectiveUserAgent.c_str());
             }
+
+            std::string headers;
+            for (size_t index = 0; index < effectiveHeaderLines.size(); index++) {
+                if (index > 0) headers.push_back(',');
+                // Escape backslashes and commas in header values.
+                for (char c : effectiveHeaderLines[index]) {
+                    if (c == '\\' || c == ',') headers.push_back('\\');
+                    headers.push_back(c);
+                }
+            }
+            setMpvOptionStringLocked("http-header-fields", headers.c_str());
 
             int initResult = api.initialize(mpv);
             if (initResult < 0) {
