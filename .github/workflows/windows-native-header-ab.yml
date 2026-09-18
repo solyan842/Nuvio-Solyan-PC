@@ -97,13 +97,20 @@ jobs:
           [IO.File]::WriteAllBytes((Join-Path $entryDir "player_bridge.dll"), [Text.Encoding]::ASCII.GetBytes("ORIGINAL-BRIDGE"))
           [IO.File]::WriteAllText((Join-Path $sandbox "jarroot\marker.txt"), "original")
 
+          $jarRoot = Join-Path $sandbox "jarroot"
           $jar = Join-Path $sandbox "composeApp-desktop-selftest.jar"
-          Compress-Archive -Path (Join-Path $sandbox "jarroot\*") -DestinationPath $jar -CompressionLevel Optimal
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [System.IO.Compression.ZipFile]::CreateFromDirectory(
+            $jarRoot,
+            $jar,
+            [System.IO.Compression.CompressionLevel]::Optimal,
+            $false
+          )
           $originalJarHash = (Get-FileHash $jar -Algorithm SHA256).Hash.ToLowerInvariant()
           $patchDllHash = (Get-FileHash $builtDll -Algorithm SHA256).Hash.ToLowerInvariant()
 
           & "tools\native-header-ab\APPLY.ps1" -JarPath $jar
-          if ($LASTEXITCODE -ne 0) { throw "APPLY.ps1 returned exit code $LASTEXITCODE" }
+          if (-not $?) { throw "APPLY.ps1 failed" }
 
           $backup = "$jar.solyan-sfilm3-original.bak"
           if (-not (Test-Path $backup)) { throw "APPLY did not create rollback backup" }
@@ -127,7 +134,7 @@ jobs:
           }
 
           & "tools\native-header-ab\ROLLBACK.ps1" -JarPath $jar
-          if ($LASTEXITCODE -ne 0) { throw "ROLLBACK.ps1 returned exit code $LASTEXITCODE" }
+          if (-not $?) { throw "ROLLBACK.ps1 failed" }
 
           $restoredJarHash = (Get-FileHash $jar -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($restoredJarHash -ne $originalJarHash) {
