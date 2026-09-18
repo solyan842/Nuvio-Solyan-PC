@@ -38,6 +38,7 @@ try {
             Write-Host "ALREADY PATCHED" -ForegroundColor Green
             Write-Host "Stable fix is already present and rollback data is available."
             Write-Host "JAR: $jar"
+            Write-Output "RESULT_CODE=ALREADY_PATCHED"
             return
         }
 
@@ -64,6 +65,7 @@ try {
                 Write-Host "The working runtime A/B has been adopted as Nuvio-SolYan-PC libmpv Fix v$script:FixVersion."
                 Write-Host "No binary was changed during this adoption."
                 Write-Host "Rollback backup: $stableBackup"
+                Write-Output "RESULT_CODE=ADOPTED"
                 return
             }
         }
@@ -72,6 +74,7 @@ try {
         Write-Host "ALREADY PATCHED" -ForegroundColor Green
         Write-Host "The fixed libmpv is present, but this package cannot prove where its rollback backup is."
         Write-Host "No changes were made."
+        Write-Output "RESULT_CODE=ALREADY_PATCHED_NO_STATE"
         return
     }
 
@@ -81,6 +84,7 @@ try {
         Write-Host "Installed libmpv SHA256: $currentLibmpvHash"
         Write-Host "This is not the known bad Nuvio runtime, so the stable patch will NOT overwrite it."
         Write-Host "Verify the new Nuvio runtime before deciding whether any patch is still needed."
+        Write-Output "RESULT_CODE=UPSTREAM_CHANGED"
         return
     }
 
@@ -170,6 +174,7 @@ try {
     Write-Host "Fixed libmpv   : $script:FixedLibmpvSha256"
     Write-Host ""
     Write-Host "Start Nuvio normally."
+    Write-Output "RESULT_CODE=PATCHED"
 } catch {
     Write-Host ""
     Write-Host "PATCH FAILED - NO UNSAFE FALLBACK" -ForegroundColor Red
