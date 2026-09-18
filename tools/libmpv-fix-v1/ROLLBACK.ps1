@@ -1,5 +1,5 @@
-. "$PSScriptRoot\COMMON.ps1"
 param([string]$JarPath)
+. "$PSScriptRoot\COMMON.ps1"
 
 $LocalStateFile = Join-Path $PSScriptRoot "PATCH-STATE.txt"
 
@@ -51,7 +51,7 @@ try {
         Write-Host ""
         Write-Host "ALREADY ROLLED BACK" -ForegroundColor Green
         Write-Host "The installed JAR already matches the original backup."
-        exit 0
+        return
     }
 
     if ($currentJarHash -ne $patchedJarHash) {
