@@ -83,6 +83,61 @@ jobs:
             Write-Host "PowerShell syntax OK: $script"
           }
 
+      - name: Self-test Apply and Rollback on synthetic JAR
+        shell: pwsh
+        run: |
+          $builtDll = (Resolve-Path "composeApp\build\native\windows\player_bridge.dll").Path
+          $toolDir = (Resolve-Path "tools\native-header-ab").Path
+          Copy-Item $builtDll (Join-Path $toolDir "player_bridge.dll") -Force
+
+          $sandbox = Join-Path $env:RUNNER_TEMP "nuvio-native-ab-selftest"
+          Remove-Item $sandbox -Recurse -Force -ErrorAction SilentlyContinue
+          $entryDir = Join-Path $sandbox "jarroot\native\windows"
+          New-Item -ItemType Directory -Force -Path $entryDir | Out-Null
+          [IO.File]::WriteAllBytes((Join-Path $entryDir "player_bridge.dll"), [Text.Encoding]::ASCII.GetBytes("ORIGINAL-BRIDGE"))
+          [IO.File]::WriteAllText((Join-Path $sandbox "jarroot\marker.txt"), "original")
+
+          $jar = Join-Path $sandbox "composeApp-desktop-selftest.jar"
+          Compress-Archive -Path (Join-Path $sandbox "jarroot\*") -DestinationPath $jar -CompressionLevel Optimal
+          $originalJarHash = (Get-FileHash $jar -Algorithm SHA256).Hash.ToLowerInvariant()
+          $patchDllHash = (Get-FileHash $builtDll -Algorithm SHA256).Hash.ToLowerInvariant()
+
+          & "tools\native-header-ab\APPLY.ps1" -JarPath $jar
+          if ($LASTEXITCODE -ne 0) { throw "APPLY.ps1 returned exit code $LASTEXITCODE" }
+
+          $backup = "$jar.solyan-sfilm3-original.bak"
+          if (-not (Test-Path $backup)) { throw "APPLY did not create rollback backup" }
+
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [System.IO.Compression.ZipFile]::OpenRead($jar)
+          try {
+            $entry = $zip.GetEntry("native/windows/player_bridge.dll")
+            if ($null -eq $entry) { throw "Patched JAR lost player_bridge.dll" }
+            $entryStream = $entry.Open()
+            try {
+              $sha = [Security.Cryptography.SHA256]::Create()
+              try {
+                $patchedEntryHash = ([BitConverter]::ToString($sha.ComputeHash($entryStream))).Replace("-", "").ToLowerInvariant()
+              } finally { $sha.Dispose() }
+            } finally { $entryStream.Dispose() }
+          } finally { $zip.Dispose() }
+
+          if ($patchedEntryHash -ne $patchDllHash) {
+            throw "APPLY verification failed. Expected $patchDllHash, got $patchedEntryHash"
+          }
+
+          & "tools\native-header-ab\ROLLBACK.ps1" -JarPath $jar
+          if ($LASTEXITCODE -ne 0) { throw "ROLLBACK.ps1 returned exit code $LASTEXITCODE" }
+
+          $restoredJarHash = (Get-FileHash $jar -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($restoredJarHash -ne $originalJarHash) {
+            throw "ROLLBACK did not restore the exact original JAR"
+          }
+
+          Write-Host "APPLY/ROLLBACK SELF-TEST PASS"
+          Remove-Item (Join-Path $toolDir "player_bridge.dll") -Force
+          Remove-Item (Join-Path $toolDir "PATCH-STATE.txt") -Force -ErrorAction SilentlyContinue
+
       - name: Verify and collect package
         shell: pwsh
         run: |
@@ -108,6 +163,7 @@ jobs:
             "CHANGE=PlayTorrio-compatible default HTTP identity only"
             "SCOPE=Windows native player bridge only"
             "ROLLBACK=Untouched application JAR backup created before patch"
+            "SELF_TEST=Apply and exact-JAR rollback passed on Windows runner"
           ) | Set-Content out\PATCH-MANIFEST.txt -Encoding ascii
 
           $expected = @(
