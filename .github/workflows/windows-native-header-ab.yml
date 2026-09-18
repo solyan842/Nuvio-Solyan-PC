@@ -62,7 +62,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Validate PowerShell patch helpers
-        shell: pwsh
+        shell: powershell
         run: |
           $scripts = @(
             "tools\native-header-ab\APPLY.ps1",
@@ -84,7 +84,7 @@ jobs:
           }
 
       - name: Self-test Apply and Rollback on synthetic JAR
-        shell: pwsh
+        shell: powershell
         run: |
           $builtDll = (Resolve-Path "composeApp\build\native\windows\player_bridge.dll").Path
           $toolDir = (Resolve-Path "tools\native-header-ab").Path
