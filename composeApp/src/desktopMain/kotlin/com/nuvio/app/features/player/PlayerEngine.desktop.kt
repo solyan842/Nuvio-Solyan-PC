@@ -40,6 +40,23 @@ import kotlinx.coroutines.flow.drop
 
 private val solYanPlaybackDebugLog = Logger.withTag("SolYanPlaybackDebug")
 
+internal const val SOLYAN_WINDOWS_DEFAULT_USER_AGENT =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
+internal fun Map<String, String>.withWindowsPlaybackDefaults(): Map<String, String> {
+    val merged = linkedMapOf(
+        "Connection" to "keep-alive",
+        "Accept" to "*/*",
+        "User-Agent" to SOLYAN_WINDOWS_DEFAULT_USER_AGENT,
+    )
+    forEach { (key, value) ->
+        merged.keys.firstOrNull { existing -> existing.equals(key, ignoreCase = true) }
+            ?.let { existing -> merged.remove(existing) }
+        merged[key] = value
+    }
+    return merged
+}
+
 private fun solYanPlaybackDebug(message: String) {
     solYanPlaybackDebugLog.i { message }
     if (DesktopHostOs.current != DesktopHostOs.WINDOWS) return
@@ -147,7 +164,14 @@ private fun NativePlayerSurface(
     val controller = remember(host) { NativePlayerController(host) }
     val hostFirstPaintComplete = remember { mutableStateOf(false) }
     val hostFirstFullSizePaintComplete = remember { mutableStateOf(false) }
-    val playbackHeaders = remember(sourceHeaders) { sanitizePlaybackHeaders(sourceHeaders) }
+    val playbackHeaders = remember(sourceHeaders) {
+        val sanitized = sanitizePlaybackHeaders(sourceHeaders)
+        if (DesktopHostOs.current == DesktopHostOs.WINDOWS) {
+            sanitized.withWindowsPlaybackDefaults()
+        } else {
+            sanitized
+        }
+    }
     val latestOnPlayerControlsAction = rememberUpdatedState(onPlayerControlsAction)
     val latestOnPlayerControlsEvent = rememberUpdatedState(onPlayerControlsEvent)
     val latestOnPlayerControlsScrubChange = rememberUpdatedState(onPlayerControlsScrubChange)
@@ -226,7 +250,7 @@ private fun NativePlayerSurface(
         delay(16L)
         if (DesktopHostOs.current == DesktopHostOs.WINDOWS) {
             solYanPlaybackDebug(
-                "ATTACH source=${sourceUrl.toSolYanDebugSourceKey()} initialPositionMs=$initialPositionMs playWhenReady=$playWhenReady"
+                "ATTACH source=${sourceUrl.toSolYanDebugSourceKey()} initialPositionMs=$initialPositionMs playWhenReady=$playWhenReady headers=${playbackHeaders.keys.sorted()}"
             )
         }
         controller.attach(
