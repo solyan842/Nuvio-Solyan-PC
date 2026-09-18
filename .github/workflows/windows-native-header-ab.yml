@@ -99,13 +99,14 @@ jobs:
 
           $jarRoot = Join-Path $sandbox "jarroot"
           $jar = Join-Path $sandbox "composeApp-desktop-selftest.jar"
-          Add-Type -AssemblyName System.IO.Compression.FileSystem
-          [System.IO.Compression.ZipFile]::CreateFromDirectory(
-            $jarRoot,
-            $jar,
-            [System.IO.Compression.CompressionLevel]::Optimal,
-            $false
-          )
+          & jar --create --file $jar -C $jarRoot .
+          if ($LASTEXITCODE -ne 0) { throw "jar.exe failed to create synthetic JAR" }
+          $jarEntries = & jar --list --file $jar
+          if ($LASTEXITCODE -ne 0) { throw "jar.exe failed to inspect synthetic JAR" }
+          if ($jarEntries -notcontains "native/windows/player_bridge.dll") {
+            $jarEntries | ForEach-Object { Write-Host "JAR ENTRY: $_" }
+            throw "Synthetic JAR does not contain native/windows/player_bridge.dll"
+          }
           $originalJarHash = (Get-FileHash $jar -Algorithm SHA256).Hash.ToLowerInvariant()
           $patchDllHash = (Get-FileHash $builtDll -Algorithm SHA256).Hash.ToLowerInvariant()
 
