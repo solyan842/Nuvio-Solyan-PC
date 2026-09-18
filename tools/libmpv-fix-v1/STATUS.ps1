@@ -1,5 +1,5 @@
-. "$PSScriptRoot\COMMON.ps1"
 param([string]$JarPath)
+. "$PSScriptRoot\COMMON.ps1"
 
 try {
     $jar = Find-NuvioJar $JarPath
