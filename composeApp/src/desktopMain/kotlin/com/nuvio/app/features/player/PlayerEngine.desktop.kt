@@ -40,6 +40,27 @@ import kotlinx.coroutines.flow.drop
 
 private val solYanPlaybackDebugLog = Logger.withTag("SolYanPlaybackDebug")
 
+private fun solYanPlaybackDebug(message: String) {
+    solYanPlaybackDebugLog.i { message }
+    if (DesktopHostOs.current != DesktopHostOs.WINDOWS) return
+    runCatching {
+        val baseDir = System.getenv("LOCALAPPDATA")
+            ?.takeIf { it.isNotBlank() }
+            ?: System.getProperty("user.home").orEmpty()
+        val logDir = java.nio.file.Paths.get(baseDir, "Nuvio")
+        java.nio.file.Files.createDirectories(logDir)
+        java.nio.file.Files.writeString(
+            logDir.resolve("solyan-playback-debug.log"),
+            "${java.time.Instant.now()} $message\n",
+            java.nio.charset.StandardCharsets.UTF_8,
+            java.nio.file.StandardOpenOption.CREATE,
+            java.nio.file.StandardOpenOption.APPEND,
+        )
+    }.onFailure { error ->
+        solYanPlaybackDebugLog.w(error) { "failed to write SolYan playback debug file" }
+    }
+}
+
 @Composable
 actual fun PlatformPlayerSurface(
     sourceUrl: String,
@@ -204,9 +225,9 @@ private fun NativePlayerSurface(
         }
         delay(16L)
         if (DesktopHostOs.current == DesktopHostOs.WINDOWS) {
-            solYanPlaybackDebugLog.i {
+            solYanPlaybackDebug(
                 "ATTACH source=${sourceUrl.toSolYanDebugSourceKey()} initialPositionMs=$initialPositionMs playWhenReady=$playWhenReady"
-            }
+            )
         }
         controller.attach(
             sourceUrl = sourceUrl,
@@ -260,11 +281,11 @@ private fun NativePlayerSurface(
             if (DesktopHostOs.current == DesktopHostOs.WINDOWS &&
                 (snapshot != previousDebugSnapshot.value || snapshot.isEnded)
             ) {
-                solYanPlaybackDebugLog.i {
+                solYanPlaybackDebug(
                     "SNAPSHOT source=${sourceUrl.toSolYanDebugSourceKey()} " +
                         "positionMs=${snapshot.positionMs} durationMs=${snapshot.durationMs} " +
                         "loading=${snapshot.isLoading} playing=${snapshot.isPlaying} ended=${snapshot.isEnded}"
-                }
+                )
                 previousDebugSnapshot.value = snapshot
             }
             delay(500L)
