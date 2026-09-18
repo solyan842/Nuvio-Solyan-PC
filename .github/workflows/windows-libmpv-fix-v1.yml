@@ -180,7 +180,7 @@ jobs:
 
           $statusBefore = (& "tools\libmpv-fix-v1\STATUS.ps1" -JarPath $jar 2>&1 | Out-String)
           Write-Host $statusBefore
-          if ($statusBefore -notmatch "STATUS: NEEDS_PATCH") {
+          if ($statusBefore -notmatch "STATUS_CODE=NEEDS_PATCH") {
             throw "STATUS did not report NEEDS_PATCH before Apply"
           }
 
@@ -189,7 +189,7 @@ jobs:
 
           $statusAfter = (& "tools\libmpv-fix-v1\STATUS.ps1" -JarPath $jar 2>&1 | Out-String)
           Write-Host $statusAfter
-          if ($statusAfter -notmatch "STATUS: PATCHED") {
+          if ($statusAfter -notmatch "STATUS_CODE=PATCHED") {
             throw "STATUS did not report PATCHED after Apply"
           }
 
@@ -222,7 +222,7 @@ jobs:
 
           $statusRestored = (& "tools\libmpv-fix-v1\STATUS.ps1" -JarPath $jar 2>&1 | Out-String)
           Write-Host $statusRestored
-          if ($statusRestored -notmatch "STATUS: NEEDS_PATCH") {
+          if ($statusRestored -notmatch "STATUS_CODE=NEEDS_PATCH") {
             throw "STATUS did not return to NEEDS_PATCH after rollback"
           }
 
